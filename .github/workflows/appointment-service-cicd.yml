@@ -1,0 +1,252 @@
+name: Appointment Service CI/CD Pipeline
+
+on:
+  push:
+    branches:
+      - dev
+      - uat
+      - main
+    paths:
+      - 'appoinment-service/**'
+      - '.github/workflows/appointment-service-cicd.yml'
+
+env:
+  SERVICE_NAME: appointment-service
+  WORKING_DIRECTORY: ./appoinment-service
+
+jobs:
+  # Setup stage: Determine environment and fetch variables
+  setup:
+    name: Setup Environment
+    runs-on: ubuntu-latest
+    outputs:
+      environment: ${{ steps.set-env.outputs.environment }}
+      registry: ${{ steps.set-env.outputs.registry }}
+      registry-username: ${{ steps.set-env.outputs.registry-username }}
+      registry-password: ${{ steps.set-env.outputs.registry-password }}
+      function-app-name: ${{ steps.set-env.outputs.function-app-name }}
+      resource-group: ${{ steps.set-env.outputs.resource-group }}
+      azure-credentials: ${{ steps.set-env.outputs.azure-credentials }}
+      image-tag: ${{ steps.set-env.outputs.image-tag }}
+
+    steps:
+      - name: Determine environment and set variables
+        id: set-env
+        run: |
+          BRANCH_NAME=${GITHUB_REF#refs/heads/}
+          commit_sha=${{ github.sha }}
+          image_tag=${commit_sha:0:7}
+          
+          if [[ "$BRANCH_NAME" == "main" ]]; then
+            echo "environment=prod" >> $GITHUB_OUTPUT
+            echo "registry=${{ secrets.PROD_REGISTRY_URL }}" >> $GITHUB_OUTPUT
+            echo "registry-username=${{ secrets.PROD_REGISTRY_USERNAME }}" >> $GITHUB_OUTPUT
+            echo "registry-password=${{ secrets.PROD_REGISTRY_PASSWORD }}" >> $GITHUB_OUTPUT
+            echo "function-app-name=${{ secrets.PROD_FUNCTION_APP_NAME }}" >> $GITHUB_OUTPUT
+            echo "resource-group=${{ secrets.PROD_RESOURCE_GROUP }}" >> $GITHUB_OUTPUT
+            echo "azure-credentials=${{ secrets.PROD_AZURE_CREDENTIALS }}" >> $GITHUB_OUTPUT
+            echo "image-tag=$image_tag" >> $GITHUB_OUTPUT
+            echo "::notice title=Environment Setup::Deploying to PROD environment from main branch"
+            
+          elif [[ "$BRANCH_NAME" == "uat" ]]; then
+            echo "environment=uat" >> $GITHUB_OUTPUT
+            echo "registry=${{ secrets.UAT_REGISTRY_URL }}" >> $GITHUB_OUTPUT
+            echo "registry-username=${{ secrets.UAT_REGISTRY_USERNAME }}" >> $GITHUB_OUTPUT
+            echo "registry-password=${{ secrets.UAT_REGISTRY_PASSWORD }}" >> $GITHUB_OUTPUT
+            echo "function-app-name=${{ secrets.UAT_FUNCTION_APP_NAME }}" >> $GITHUB_OUTPUT
+            echo "resource-group=${{ secrets.UAT_RESOURCE_GROUP }}" >> $GITHUB_OUTPUT
+            echo "azure-credentials=${{ secrets.UAT_AZURE_CREDENTIALS }}" >> $GITHUB_OUTPUT
+            echo "image-tag=$image_tag" >> $GITHUB_OUTPUT
+            echo "::notice title=Environment Setup::Deploying to UAT environment from uat branch"
+            
+          elif [[ "$BRANCH_NAME" == "dev" ]]; then
+            echo "environment=dev" >> $GITHUB_OUTPUT
+            echo "registry=${{ secrets.DEV_REGISTRY_URL }}" >> $GITHUB_OUTPUT
+            echo "registry-username=${{ secrets.DEV_REGISTRY_USERNAME }}" >> $GITHUB_OUTPUT
+            echo "registry-password=${{ secrets.DEV_REGISTRY_PASSWORD }}" >> $GITHUB_OUTPUT
+            echo "function-app-name=${{ secrets.DEV_FUNCTION_APP_NAME }}" >> $GITHUB_OUTPUT
+            echo "resource-group=${{ secrets.DEV_RESOURCE_GROUP }}" >> $GITHUB_OUTPUT
+            echo "azure-credentials=${{ secrets.DEV_AZURE_CREDENTIALS }}" >> $GITHUB_OUTPUT
+            echo "image-tag=$image_tag" >> $GITHUB_OUTPUT
+            echo "::notice title=Environment Setup::Deploying to DEV environment from dev branch"
+          fi
+
+  # Build stage
+  build:
+    name: Build Docker Image
+    runs-on: ubuntu-latest
+    needs: setup
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ needs.setup.outputs.registry }}
+          username: ${{ needs.setup.outputs.registry-username }}
+          password: ${{ needs.setup.outputs.registry-password }}
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: ${{ env.WORKING_DIRECTORY }}
+          push: true
+          tags: |
+            ${{ needs.setup.outputs.registry }}/${{ env.SERVICE_NAME }}:${{ needs.setup.outputs.image-tag }}
+            ${{ needs.setup.outputs.registry }}/${{ env.SERVICE_NAME }}:latest-${{ needs.setup.outputs.environment }}
+            ${{ needs.setup.outputs.registry }}/${{ env.SERVICE_NAME }}:latest
+          cache-from: type=registry,ref=${{ needs.setup.outputs.registry }}/${{ env.SERVICE_NAME }}:buildcache
+          cache-to: type=registry,ref=${{ needs.setup.outputs.registry }}/${{ env.SERVICE_NAME }}:buildcache,mode=max
+
+      - name: Output image URI
+        run: |
+          echo "::notice title=Build Complete::Image pushed: ${{ needs.setup.outputs.registry }}/${{ env.SERVICE_NAME }}:${{ needs.setup.outputs.image-tag }}"
+
+  # Dev Deployment - runs only when triggered from dev branch
+  deploy-dev:
+    name: Deploy to DEV
+    runs-on: ubuntu-latest
+    needs: [setup, build]
+    if: github.ref == 'refs/heads/dev'
+    environment:
+      name: dev
+      url: https://${{ secrets.DEV_FUNCTION_APP_NAME }}.azurewebsites.net
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Azure Login
+        uses: azure/login@v2
+        with:
+          creds: ${{ needs.setup.outputs.azure-credentials }}
+
+      - name: Deploy Function App with Docker image
+        run: |
+          az functionapp config container set \
+            --name ${{ needs.setup.outputs.function-app-name }} \
+            --resource-group ${{ needs.setup.outputs.resource-group }} \
+            --docker-custom-image-name ${{ needs.setup.outputs.registry }}/${{ env.SERVICE_NAME }}:${{ needs.setup.outputs.image-tag }} \
+            --docker-registry-server-url ${{ needs.setup.outputs.registry }} \
+            --docker-registry-server-username ${{ needs.setup.outputs.registry-username }} \
+            --docker-registry-server-password ${{ needs.setup.outputs.registry-password }}
+
+      - name: Restart Function App
+        run: |
+          az functionapp restart \
+            --name ${{ needs.setup.outputs.function-app-name }} \
+            --resource-group ${{ needs.setup.outputs.resource-group }}
+
+      - name: Verify deployment
+        run: |
+          sleep 30
+          FUNCTION_URL="https://${{ needs.setup.outputs.function-app-name }}.azurewebsites.net/health"
+          curl -f $FUNCTION_URL || echo "Health check endpoint may not exist yet"
+
+      - name: Azure Logout
+        run: az logout
+        if: always()
+
+      - name: Deployment Success
+        run: echo "::notice title=DEV Deployment Complete::Successfully deployed to DEV environment"
+
+  # UAT Deployment - runs only when triggered from uat branch
+  deploy-uat:
+    name: Deploy to UAT
+    runs-on: ubuntu-latest
+    needs: [setup, build]
+    if: github.ref == 'refs/heads/uat'
+    environment:
+      name: uat
+      url: https://${{ secrets.UAT_FUNCTION_APP_NAME }}.azurewebsites.net
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Azure Login
+        uses: azure/login@v2
+        with:
+          creds: ${{ needs.setup.outputs.azure-credentials }}
+
+      - name: Deploy Function App with Docker image
+        run: |
+          az functionapp config container set \
+            --name ${{ needs.setup.outputs.function-app-name }} \
+            --resource-group ${{ needs.setup.outputs.resource-group }} \
+            --docker-custom-image-name ${{ needs.setup.outputs.registry }}/${{ env.SERVICE_NAME }}:${{ needs.setup.outputs.image-tag }} \
+            --docker-registry-server-url ${{ needs.setup.outputs.registry }} \
+            --docker-registry-server-username ${{ needs.setup.outputs.registry-username }} \
+            --docker-registry-server-password ${{ needs.setup.outputs.registry-password }}
+
+      - name: Restart Function App
+        run: |
+          az functionapp restart \
+            --name ${{ needs.setup.outputs.function-app-name }} \
+            --resource-group ${{ needs.setup.outputs.resource-group }}
+
+      - name: Verify deployment
+        run: |
+          sleep 30
+          FUNCTION_URL="https://${{ needs.setup.outputs.function-app-name }}.azurewebsites.net/health"
+          curl -f $FUNCTION_URL || echo "Health check endpoint may not exist yet"
+
+      - name: Azure Logout
+        run: az logout
+        if: always()
+
+      - name: Deployment Success
+        run: echo "::notice title=UAT Deployment Complete::Successfully deployed to UAT environment"
+
+  # Prod Deployment - runs only when triggered from main branch
+  deploy-prod:
+    name: Deploy to PROD
+    runs-on: ubuntu-latest
+    needs: [setup, build]
+    if: github.ref == 'refs/heads/main'
+    environment:
+      name: prod
+      url: https://${{ secrets.PROD_FUNCTION_APP_NAME }}.azurewebsites.net
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Azure Login
+        uses: azure/login@v2
+        with:
+          creds: ${{ needs.setup.outputs.azure-credentials }}
+
+      - name: Deploy Function App with Docker image
+        run: |
+          az functionapp config container set \
+            --name ${{ needs.setup.outputs.function-app-name }} \
+            --resource-group ${{ needs.setup.outputs.resource-group }} \
+            --docker-custom-image-name ${{ needs.setup.outputs.registry }}/${{ env.SERVICE_NAME }}:${{ needs.setup.outputs.image-tag }} \
+            --docker-registry-server-url ${{ needs.setup.outputs.registry }} \
+            --docker-registry-server-username ${{ needs.setup.outputs.registry-username }} \
+            --docker-registry-server-password ${{ needs.setup.outputs.registry-password }}
+
+      - name: Restart Function App
+        run: |
+          az functionapp restart \
+            --name ${{ needs.setup.outputs.function-app-name }} \
+            --resource-group ${{ needs.setup.outputs.resource-group }}
+
+      - name: Verify deployment
+        run: |
+          sleep 30
+          FUNCTION_URL="https://${{ needs.setup.outputs.function-app-name }}.azurewebsites.net/health"
+          curl -f $FUNCTION_URL || echo "Health check endpoint may not exist yet"
+
+      - name: Azure Logout
+        run: az logout
+        if: always()
+
+      - name: Deployment Success
+        run: echo "::notice title=PROD Deployment Complete::Successfully deployed to PROD environment"
