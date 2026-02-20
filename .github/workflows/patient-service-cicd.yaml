@@ -21,9 +21,9 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       environment: ${{ steps.set-env.outputs.environment }}
-      registry: ${{ steps.set-env.outputs.registry }}
-      registry-username: ${{ steps.set-env.outputs.registry-username }}
-      registry-password: ${{ steps.set-env.outputs.registry-password }}
+      registry: 'acrpatientservice.azurecr.io'
+      registry-username: 'acrpatientservice'
+      registry-password: '4FmRGgdpiwT2BPT0Sr6fUy3KYWgK2lyWNz2MW91Fgbb6eQLXWw2wJQQJ99CBACYeBjFEqg7NAAACAZCRToie'
       function-app-name: ${{ steps.set-env.outputs.function-app-name }}
       resource-group: ${{ steps.set-env.outputs.resource-group }}
       azure-credentials: ${{ steps.set-env.outputs.azure-credentials }}
